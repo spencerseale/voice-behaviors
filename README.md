@@ -1,44 +1,11 @@
 # voice-behaviors
 
 A LiveKit voice agent traced into Braintrust **over OpenTelemetry**, with a
-masking hook on the export path.
+masking hook on the export path. The open source `BEHAVIOR.md` spec is 
+dynamically loaded and graded against the agent's behavior.
 
-## Why the OTel path
-
-`braintrust==0.23.0`'s `auto_instrument()` produces flat, braintrust-native
-spans: every per-turn operation (`eou_detection`, `stt_processing`,
-`llm_request_run`, `tts_request`, `agent_speaking`) is parented directly onto one
-long-lived `livekit_agent_session` span. LiveKit's own `agent_turn` / `user_turn`
-spans exist, but they go to the OTel provider and never reach Braintrust — so
-turn identity survives only as `speech_id` / `generation_id` metadata, not as
-nesting.
-
-Instead, this agent registers a `BraintrustSpanProcessor` on an OTel
-`TracerProvider` and hands that provider to LiveKit via `set_tracer_provider`.
-LiveKit's native OTel spans are exported to Braintrust as-is, so turns nest:
-
-```
-invoca_call                 ← OTel root, opened in handle_session
-  setup
-    setup.call_context_resolve
-    setup.session_build
-  agent_session
-    user_turn / agent_turn  ← real turn boundaries
-      stt / llm / tts
-```
-
-The root is an OTel span (not `braintrust.start_span`) because the two live in
-different context systems — the OTel root is what LiveKit's `agent_session` span
-parents under.
-
-## Masking
-
-The OTel path has no equivalent of `braintrust.set_masking_function`; that hook
-only scrubs native-SDK spans, and `BraintrustSpanProcessor` exports spans
-verbatim. `MaskingSpanProcessor` wraps the Braintrust processor and rewrites span
-attributes and per-event attributes (where voice transcripts live) on end, before
-the inner processor serializes them. `noop_masking_function` is a passthrough
-stand-in for the production redactor — the registration point is what matters.
+Skip to the "Behavior eval" section to see how the agent is graded which is the primary purpose of this repo. 
+A single EQ scorer for scoring a .wav file directly for empathy is also included.
 
 ## Run it
 
