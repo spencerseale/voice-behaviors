@@ -1,0 +1,30 @@
+# Local credentials and environment
+.env
+.env.*
+!.env.example
+
+# Python environments and build output
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Test, type-checker, and coverage caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local editor/agent state
+.claude/settings.local.json
+
+# OS and generated media artifacts
+.DS_Store
+*.wav
+*.mp3
+*.m4a
+*.log
