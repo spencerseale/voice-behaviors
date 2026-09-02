@@ -2598,6 +2598,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "braintrust" },
+    { name = "httpx" },
     { name = "livekit-agents", extra = ["openai", "silero", "turn-detector"] },
     { name = "openai" },
     { name = "opentelemetry-sdk" },
@@ -2614,6 +2615,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "braintrust", specifier = "==0.23.0" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "livekit-agents", extras = ["openai", "silero", "turn-detector"], specifier = "~=1.5" },
     { name = "openai", specifier = ">=1.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.39.1" },

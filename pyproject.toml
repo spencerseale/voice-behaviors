@@ -5,6 +5,7 @@ description = "LiveKit voice agent traced into Braintrust over OpenTelemetry, wi
 requires-python = ">=3.11"
 dependencies = [
     "braintrust==0.23.0",
+    "httpx>=0.28",
     "livekit-agents[openai,silero,turn-detector]~=1.5",
     "openai>=1.0",
     "opentelemetry-sdk>=1.39.1",

@@ -77,6 +77,23 @@ make sim CASE=hours-probe   # run one call locally, print the transcript
 make eval               # grade every scenario against the spec
 ```
 
+### Online Braintrust scoring
+
+The same four behavior scorers can be pushed as Braintrust online scorers. The
+audio empathy scorer is intentionally not part of the online setup.
+
+```bash
+make push-scorers       # save the four prompt scorers in Braintrust
+make automations        # attach them to online root-span scoring rules
+make topics             # enable Topics + the voice_call_friction facet
+make sample-trace       # log one sample trace and invoke scorers/facet
+make online-status      # inspect scorers and online scoring rules
+make topics-status      # inspect Topics config and progress
+```
+
+`make automations` samples behavior judges at 25% by default. Override with
+`SCORER_SAMPLING=...`, for example `make automations SCORER_SAMPLING=0.1`.
+
 LiveKit Inference is the binding constraint. A full run is ~6 calls each holding four
 or five Inference sockets, and a talkative case bills ~2 minutes of STT because the
 recognizer streams the whole open line, silence included. Sustained iteration will hit a
