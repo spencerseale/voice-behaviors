@@ -1,4 +1,4 @@
-.PHONY: agent dev dataset sim eval push-scorers automations topics topics-status online-status sample-trace test sync clean
+.PHONY: agent dev models dataset sim eval push-scorers automations topics topics-status online-status sample-trace test sync clean
 
 CASE ?= hours-probe
 PROJECT ?= voice-behaviors
@@ -12,6 +12,10 @@ agent: sync
 # Connect to LiveKit Cloud and wait for dispatch instead of running locally.
 dev: sync
 	uv run voice-behaviors dev
+
+# Download LiveKit plugin model assets into the local Hugging Face cache.
+models: sync
+	uv run python -m livekit.agents download-files
 
 # Push the simulated callers to the Braintrust dataset.
 dataset: sync

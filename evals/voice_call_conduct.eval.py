@@ -14,7 +14,14 @@ from __future__ import annotations
 
 import os
 
-from braintrust import Attachment, Eval, Score, init_dataset
+from braintrust import (
+    Attachment,
+    Eval,
+    Score,
+    SpanTypeAttribute,
+    init_dataset,
+    start_span,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -43,7 +50,7 @@ from voice_behaviors.judge import (  # noqa: E402
 )
 from voice_behaviors.simulation import CallerPersona, run_simulated_call  # noqa: E402
 from voice_behaviors.simulation.runner import call_context  # noqa: E402
-from voice_behaviors.tracing import log_call_spans  # noqa: E402
+from voice_behaviors.tracing import JOB_ENTRYPOINT_SPAN, log_call_spans  # noqa: E402
 
 SPEC = load_behavior_spec()
 CONTEXT = call_context()
@@ -59,14 +66,29 @@ CONTEXT = call_context()
 async def run_call(input: str, hooks) -> dict:  # noqa: A002 - Braintrust's arg name
     """Run one voice-to-voice call and hand back the trajectory to be judged."""
     persona = CallerPersona.from_metadata(hooks.metadata)
-    result = await run_simulated_call(input, persona)
+
+    with start_span(
+        name=JOB_ENTRYPOINT_SPAN,
+        type=SpanTypeAttribute.TASK,
+    ) as root:
+        result = await run_simulated_call(input, persona)
+
+        call_metadata = {
+            "entrypoint": "eval",
+            "ended_because": result.ended_because,
+            "duration_s": round(result.duration_s, 1),
+            "livekit_usage": result.usage,
+            "agent_model": LLM_MODEL,
+            "call_context": CONTEXT,
+        }
+        root.log(input=input, output=result.as_output(), metadata=call_metadata)
+        if not result.trace_spans_logged:
+            log_call_spans(result)
 
     hooks.metadata["ended_because"] = result.ended_because
     hooks.metadata["duration_s"] = round(result.duration_s, 1)
     # LiveKit Inference consumption for this call, per model.
     hooks.metadata["livekit_usage"] = result.usage
-
-    log_call_spans(result)
 
     if result.audio:
         # Both sides of the call, stereo (caller left / agent right) on a real

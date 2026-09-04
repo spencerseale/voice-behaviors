@@ -29,10 +29,9 @@ from voice_behaviors.scenarios import SCENARIOS, by_id
 from voice_behaviors.simulation import CallResult, CallTurn, CallerPersona
 from voice_behaviors.simulation import run_simulated_call
 from voice_behaviors.simulation.runner import call_context
-from voice_behaviors.tracing import log_call_spans
+from voice_behaviors.tracing import JOB_ENTRYPOINT_SPAN, log_call_spans
 
 FACET_SLUG = "voice_call_friction"
-SAMPLE_TRACE_NAME = "sample_voice_call"
 
 
 def _static_result() -> CallResult:
@@ -79,21 +78,12 @@ def _static_result() -> CallResult:
     )
 
 
-async def _run_call(scenario_id: str, static: bool) -> tuple[dict[str, Any], CallResult]:
-    scenario = by_id(scenario_id)
-    if static:
-        return scenario, _static_result()
-
-    persona = CallerPersona.from_metadata(scenario["metadata"])
-    result = await run_simulated_call(scenario["input"], persona)
-    return scenario, result
-
-
 def _metadata(scenario: dict[str, Any], result: CallResult) -> dict[str, Any]:
     metadata = dict(scenario.get("metadata") or {})
     metadata.update(
         {
             "sample_trace": True,
+            "entrypoint": "sample_trace",
             "ended_because": result.ended_because,
             "duration_s": round(result.duration_s, 1),
             "livekit_usage": result.usage,
@@ -110,20 +100,29 @@ def _metadata(scenario: dict[str, Any], result: CallResult) -> dict[str, Any]:
     return metadata
 
 
-def _log_trace(scenario: dict[str, Any], result: CallResult) -> dict[str, Any]:
+async def _run_and_log_trace(
+    scenario_id: str, static: bool
+) -> tuple[dict[str, Any], CallResult, dict[str, Any]]:
+    scenario = by_id(scenario_id)
     logger = init_logger(project=BRAINTRUST_PROJECT)
-    metadata = _metadata(scenario, result)
     with logger.start_span(
-        name=SAMPLE_TRACE_NAME,
+        name=JOB_ENTRYPOINT_SPAN,
         type=SpanTypeAttribute.TASK,
         set_current=True,
     ) as root:
+        if static:
+            result = _static_result()
+        else:
+            persona = CallerPersona.from_metadata(scenario["metadata"])
+            result = await run_simulated_call(scenario["input"], persona)
+
+        metadata = _metadata(scenario, result)
         root.log(
             input=scenario["input"],
             output=result.as_output(),
             metadata=metadata,
         )
-        if result.spoken_turns:
+        if not result.trace_spans_logged:
             log_call_spans(result)
 
         trace_info = {
@@ -133,7 +132,7 @@ def _log_trace(scenario: dict[str, Any], result: CallResult) -> dict[str, Any]:
             "permalink": root.permalink(),
         }
     logger.flush()
-    return trace_info
+    return scenario, result, trace_info
 
 
 def _validation_payload(scenario: dict[str, Any], result: CallResult) -> dict[str, Any]:
@@ -141,6 +140,7 @@ def _validation_payload(scenario: dict[str, Any], result: CallResult) -> dict[st
     metadata.update(
         {
             "sample_trace": True,
+            "entrypoint": "sample_trace",
             "ended_because": result.ended_because,
             "duration_s": round(result.duration_s, 1),
             "agent_model": LLM_MODEL,
@@ -152,7 +152,7 @@ def _validation_payload(scenario: dict[str, Any], result: CallResult) -> dict[st
         "output": result.as_output(),
         "metadata": metadata,
         # The saved prompt scorers use this when Braintrust supplies a
-        # trace-level preprocessed view; direct function invocation needs it
+        # trace-level preprocessed view; direct function calls need it
         # supplied explicitly.
         "preprocessed": result.transcript,
     }
@@ -236,8 +236,9 @@ def main() -> None:
     if not os.environ.get("BRAINTRUST_API_KEY"):
         sys.exit("BRAINTRUST_API_KEY is not set.")
 
-    scenario, result = asyncio.run(_run_call(args.scenario, args.static))
-    trace_info = _log_trace(scenario, result)
+    scenario, result, trace_info = asyncio.run(
+        _run_and_log_trace(args.scenario, args.static)
+    )
 
     print(f"Logged sample trace for scenario={args.scenario}")
     print(f"  root_span_id={trace_info['root_span_id']}")

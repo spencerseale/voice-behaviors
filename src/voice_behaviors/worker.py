@@ -1,4 +1,4 @@
-"""Worker lifecycle: prewarm, session build, and the `invoca_call` OTel root."""
+"""Worker lifecycle: prewarm, session build, and the `job_entrypoint` OTel root."""
 
 import logging
 from typing import Any
@@ -32,6 +32,12 @@ from .config import (
     TTS_VOICE,
 )
 from .telemetry import get_tracer, setup_braintrust_telemetry
+from .tracing import (
+    CALL_CONTEXT_RESOLVE_SPAN,
+    JOB_ENTRYPOINT_SPAN,
+    SESSION_BUILD_SPAN,
+    SETUP_SPAN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +109,7 @@ async def _start_session(ctx: JobContext, session: AgentSession) -> None:
 
 
 async def handle_session(ctx: JobContext) -> None:
-    """Open the `invoca_call` OTel root, then build + start the session under it."""
+    """Open the `job_entrypoint` OTel root, then build + start the session under it."""
     await ctx.connect()
 
     tracer = get_tracer()
@@ -112,23 +118,24 @@ async def handle_session(ctx: JobContext) -> None:
         await _start_session(ctx, _build_session(ctx))
         return
 
-    # (1) invoca_call as an OTel span. While it is the current span, LiveKit's
+    # (1) job_entrypoint as an OTel span. While it is current, LiveKit's
     #     `agent_session` span (and its agent_turn/user_turn descendants) nests
     #     under it -- the OTel-context equivalent of the native-SDK contract.
-    with tracer.start_as_current_span("invoca_call") as call_span:
+    with tracer.start_as_current_span(JOB_ENTRYPOINT_SPAN) as call_span:
         call_span.set_attribute("lk.room_name", ctx.room.name)
+        call_span.set_attribute("entrypoint", "livekit_job")
 
         # (2) setup phases as child OTel spans. These close before session.start
-        #     so invoca_call -- not setup -- is current when the session opens.
-        with tracer.start_as_current_span("setup"):
-            with tracer.start_as_current_span("setup.call_context_resolve"):
+        #     so job_entrypoint -- not setup -- is current when the session opens.
+        with tracer.start_as_current_span(SETUP_SPAN):
+            with tracer.start_as_current_span(CALL_CONTEXT_RESOLVE_SPAN):
                 call_span.set_attribute("workflow_id", DEMO_WORKFLOW_ID)
                 call_span.set_attribute("tenant_id", DEMO_TENANT_ID)
                 call_span.set_attribute("is_preview", False)
-            with tracer.start_as_current_span("setup.session_build"):
+            with tracer.start_as_current_span(SESSION_BUILD_SPAN):
                 session = _build_session(ctx)
 
-        # (3) Start the agent INSIDE invoca_call (setup spans already closed).
+        # (3) Start the agent INSIDE job_entrypoint (setup spans already closed).
         await _start_session(ctx, session)
 
 

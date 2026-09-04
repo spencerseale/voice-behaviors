@@ -11,6 +11,7 @@ A single EQ scorer for scoring a .wav file directly for empathy is also included
 
 ```bash
 cp .env.example .env    # fill in BRAINTRUST_API_KEY + LIVEKIT_* credentials
+make models             # one-time LiveKit model asset download
 make agent              # interactive local session (mic/speaker)
 ```
 
@@ -23,8 +24,13 @@ uv run voice-behaviors --list-devices   # pick a mic/speaker
 make dev                                # connect to LiveKit Cloud, await dispatch
 ```
 
+Run `make models` once before the first `make agent`. It populates the local
+Hugging Face cache used by LiveKit plugins. On a fresh machine, container, or
+cleared cache, the multilingual turn detector can fail at startup with
+`Could not find file "languages.json"` until this has run.
+
 Without `BRAINTRUST_API_KEY` the agent still runs; telemetry setup is skipped and
-`handle_session` runs without the root span wrapper.
+`handle_session` runs without the `job_entrypoint` root span wrapper.
 
 Traces land in the `voice-behaviors` Braintrust project. View them in
 the trace **timeline**, not the summary metrics.
@@ -121,6 +127,15 @@ deliberately not called here: it installs the `BraintrustSpanProcessor`, whose s
 export against its own `parent`, so every simulated call used to dump a LiveKit trace
 into the logs and mix synthetic eval traffic with real agent traffic.
 
+The live worker path (`make agent` / `make dev`) opens an OTel `job_entrypoint`
+root, adds `setup` children, then starts LiveKit so its real `agent_session` subtree
+nests under that root. Sample traces and eval cases use Braintrust's native span
+API instead, but keep the same public shape: `job_entrypoint` contains `setup`,
+caller generation spans, and an `agent_session` subtree with `user_turn`,
+`agent_turn`, and `llm_node` children. Dynamic simulated calls emit those spans
+while the call is running; `log_call_spans` is only the fallback for static or
+externally supplied results.
+
 `BRAINTRUST_OTEL_COMPAT` is also deliberately unset. It swaps in an OTel-backed context
 manager, and with it on the `wrap_openai` spans for the judge and caller never reach the
 experiment — taking their token counts with them. It does not buy nesting either: the
@@ -167,7 +182,7 @@ Two things worth knowing before changing the value:
   seconds — including when it is zero. Without it a judge has no timing information and
   invents overlap; with a vaguer wording it read clean alternation as "the agent yielded
   well" and scored 1 for a behavior that never fired.
-- The worker path (dispatch, RoomIO, the `invoca_call` root span) isn't exercised; the
+- The worker path (dispatch, RoomIO, the `job_entrypoint` root span) isn't exercised; the
   eval case span takes that role.
 - **Verdicts move between runs on identical code.** The caller runs at temperature 0.7
   and the agent and STT are non-deterministic, so every run is a different conversation.
@@ -186,8 +201,8 @@ Two things worth knowing before changing the value:
 evals/voice_call_conduct.eval.py                   Eval: data, task, one scorer per behavior
 scripts/seed_dataset.py                            push scenarios to Braintrust
 src/voice_behaviors/
-  cli.py         entrypoint; defaults the bare invocation to `console`
-  worker.py      prewarm, build_session, invoca_call root, AgentServer
+  cli.py         entrypoint; defaults the bare run to `console`
+  worker.py      prewarm, build_session, job_entrypoint root, AgentServer
   agent.py       Assistant (greeting, seeded chat_ctx, custom llm_node)
   telemetry.py   BraintrustSpanProcessor registration + tracer accessor
   masking.py     MaskingSpanProcessor + no-op redactor stand-in

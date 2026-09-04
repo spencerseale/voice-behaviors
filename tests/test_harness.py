@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+import voice_behaviors.tracing as call_tracing
 from voice_behaviors import audio_empathy
 from voice_behaviors.audio_empathy import (
     AudioEmpathyJudgment,
@@ -215,6 +216,89 @@ def test_valid_verdict_parses():
     judgment = _parse_verdict('{"verdict": "false", "rationale": "because"}')
     assert judgment is not None
     assert judgment.verdict == "false" and judgment.rationale == "because"
+
+
+# --- trace shape ----------------------------------------------------------- #
+
+
+def test_replayed_call_spans_match_livekit_shape_and_timing(monkeypatch):
+    events = []
+
+    class _FakeSpan:
+        def __init__(self, name: str | None) -> None:
+            self.name = name
+
+        def start_span(self, name=None, type=None, start_time=None, set_current=None):
+            events.append(
+                ("child_start", self.name, name, start_time, type, set_current)
+            )
+            return _FakeSpan(name)
+
+        def set_current(self) -> None:
+            events.append(("set_current", self.name))
+
+        def unset_current(self) -> None:
+            events.append(("unset_current", self.name))
+
+        def log(self, **kwargs) -> None:
+            events.append(("log", self.name, kwargs))
+
+        def end(self, end_time=None) -> None:
+            events.append(("end", self.name, end_time))
+
+    def fake_start_span(name=None, type=None, start_time=None, set_current=None):
+        events.append(("start", name, start_time, type, set_current))
+        return _FakeSpan(name)
+
+    monkeypatch.setattr(call_tracing, "start_span", fake_start_span)
+    result = SimpleNamespace(
+        spoken_turns=[
+            {"speaker": "caller", "text": "hi", "start": 10.0, "end": 11.0},
+            {"speaker": "agent", "text": "hello", "start": 12.0, "end": 13.5},
+        ],
+        agent_turns=[
+            {"role": "assistant", "created_at": 11.8, "metrics": {"tokens": 3}},
+        ],
+    )
+
+    assert call_tracing.log_call_spans(result) == 2
+
+    starts = [event for event in events if event[0] in ("start", "child_start")]
+    assert starts == [
+        (
+            "start",
+            call_tracing.AGENT_SESSION_SPAN,
+            10.0,
+            call_tracing.SpanTypeAttribute.TASK,
+            False,
+        ),
+        (
+            "child_start",
+            call_tracing.AGENT_SESSION_SPAN,
+            call_tracing.USER_TURN_SPAN,
+            10.0,
+            call_tracing.SpanTypeAttribute.TASK,
+            False,
+        ),
+        (
+            "child_start",
+            call_tracing.AGENT_SESSION_SPAN,
+            call_tracing.AGENT_TURN_SPAN,
+            11.8,
+            call_tracing.SpanTypeAttribute.TASK,
+            False,
+        ),
+        (
+            "child_start",
+            call_tracing.AGENT_TURN_SPAN,
+            call_tracing.LLM_NODE_SPAN,
+            11.8,
+            call_tracing.SpanTypeAttribute.LLM,
+            False,
+        ),
+    ]
+    assert ("end", call_tracing.LLM_NODE_SPAN, 12.0) in events
+    assert events[-1] == ("end", call_tracing.AGENT_SESSION_SPAN, 13.5)
 
 
 # --- audio empathy scorer -------------------------------------------------- #

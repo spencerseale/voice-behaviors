@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+from braintrust import SpanTypeAttribute, start_span
 from livekit import rtc
 from livekit.agents import APIConnectOptions, inference
 from livekit.agents import stt as stt_pkg
@@ -41,6 +42,12 @@ from ..config import (
     DEMO_GREETING,
     DEMO_SYSTEM_PROMPT,
     caller_voice,
+)
+from ..tracing import (
+    CALL_CONTEXT_RESOLVE_SPAN,
+    SESSION_BUILD_SPAN,
+    SETUP_SPAN,
+    CallTraceSpans,
 )
 from ..worker import build_session
 from .audio import SAMPLE_RATE, CallerAudioInput, TranscribingAudioOutput
@@ -125,9 +132,11 @@ class CallResult:
     usage: dict[str, Any] = field(default_factory=dict)
     # One entry per agent turn: what it said plus LiveKit's own latency metrics.
     agent_turns: list[dict[str, Any]] = field(default_factory=list)
-    # Every spoken turn with absolute start/end epochs, so it can be replayed as a
-    # span at the moment it actually happened rather than all at once at the end.
+    # Every spoken turn with absolute start/end epochs, used for output and for
+    # fallback trace replay when a result was not logged while the call ran.
     spoken_turns: list[dict[str, Any]] = field(default_factory=list)
+    # True when the simulator emitted native Braintrust turn spans as the call ran.
+    trace_spans_logged: bool = False
 
     def as_output(self) -> dict[str, Any]:
         return {
@@ -325,9 +334,11 @@ class _CallRunner:
         # Wall clock at call start; segment offsets are relative to it.
         self._epoch0 = 0.0
         self._session: Any = None
+        self._trace = CallTraceSpans()
         # How many user-role messages the agent's recognizer had produced when the
         # last caller turn was spoken. New ones since then belong to that turn.
         self._heard_cursor = 0
+        self._agent_history_cursor = 0
         self._caller_stt, self._caller_tts = _caller_models(persona)
 
     async def run(self) -> CallResult:
@@ -341,10 +352,17 @@ class _CallRunner:
     async def _run(self) -> CallResult:
         started = self._t0 = time.monotonic()
         self._epoch0 = time.time()
-        session = self._session = build_session(vad=_vad())
+        with start_span(name=SETUP_SPAN, type=SpanTypeAttribute.TASK):
+            with start_span(
+                name=CALL_CONTEXT_RESOLVE_SPAN, type=SpanTypeAttribute.TASK
+            ) as span:
+                span.log(metadata={"call_context": call_context()})
+            with start_span(name=SESSION_BUILD_SPAN, type=SpanTypeAttribute.TASK):
+                session = self._session = build_session(vad=_vad())
         session.input.audio = self._line
         session.output.audio = self._ear
         self._line.start()
+        self._trace.start_session(start_time=self._epoch0)
 
         ended = "completed"
         usage: dict[str, Any] = {}
@@ -368,6 +386,7 @@ class _CallRunner:
             # want to see. Must run before aclose() tears the session down.
             usage = self._collect_usage(session)
             agent_turns = self._collect_agent_turns(session)
+            self._trace.apply_agent_turn_metrics(agent_turns)
 
             with _suppress():
                 await session.aclose()
@@ -383,6 +402,7 @@ class _CallRunner:
             self._ear.on_frame = None
             with _suppress():
                 await self._close_live_stt()
+            self._trace.end_session(end_time=time.time())
 
         return CallResult(
             transcript=render_transcript(
@@ -395,15 +415,17 @@ class _CallRunner:
             usage=usage,
             agent_turns=agent_turns,
             spoken_turns=self._spoken_turns(),
+            trace_spans_logged=self._trace.spans_logged,
         )
 
     def _spoken_turns(self) -> list[dict[str, Any]]:
         """Each spoken turn with the absolute epoch it started and ended.
 
         Derived from the audio timeline, which is the only record of when each side
-        actually spoke. Without real timestamps the replayed spans all land at the
-        end of the case and read as though the conversation happened after every
-        model call, rather than the model calls happening inside the conversation.
+        actually spoke. Without real timestamps the fallback spans all land at
+        the end of the case and read as though the conversation happened after
+        every model call, rather than the model calls happening inside the
+        conversation.
         """
         turns = []
         texts = {"caller": [], "agent": []}
@@ -478,6 +500,7 @@ class _CallRunner:
                     {
                         "role": item.role,
                         "text": item.text_content or "",
+                        "created_at": getattr(item, "created_at", None),
                         "metrics": {k: round(v, 3) for k, v in metrics.items()
                                     if isinstance(v, (int, float))},
                     }
@@ -485,6 +508,20 @@ class _CallRunner:
         except Exception as exc:  # reporting must never fail a call
             logger.warning("could not read session history: %s", exc)
         return turns
+
+    def _next_agent_history_turn(self) -> dict[str, Any] | None:
+        if self._session is None:
+            return None
+        assistant_turns = [
+            turn
+            for turn in self._collect_agent_turns(self._session)
+            if turn["role"] == "assistant"
+        ]
+        if self._agent_history_cursor >= len(assistant_turns):
+            return None
+        turn = assistant_turns[self._agent_history_cursor]
+        self._agent_history_cursor += 1
+        return turn
 
     def _collect_usage(self, session: Any) -> dict[str, Any]:
         """Tally what this call actually consumed from LiveKit Inference.
@@ -615,13 +652,18 @@ class _CallRunner:
             with _suppress():
                 await stream.aclose()
 
+        offset = started_at if started_at is not None else time.monotonic() - self._t0
+        pcm = b"".join(chunks)
         self._segments.append(
-            _Segment(
-                at=started_at if started_at is not None else time.monotonic() - self._t0,
-                pcm=b"".join(chunks),
-                rate=rate,
-                speaker="caller",
-            )
+            _Segment(at=offset, pcm=pcm, rate=rate, speaker="caller")
+        )
+        self._trace.log_user_turn(
+            {
+                "speaker": "caller",
+                "text": text,
+                "start": self._epoch0 + offset,
+                "end": self._epoch0 + offset + len(pcm) / 2 / rate,
+            }
         )
         await self._line.wait_until_spoken()
         # Trailing silence is what actually ends the caller's turn: VAD endpointing
@@ -650,18 +692,21 @@ class _CallRunner:
             return False
 
         rate = self._ear.captured_rate
-        self._segments.append(
-            _Segment(
-                at=max(0.0, (time.monotonic() - self._t0) - (len(pcm) / 2 / rate)),
-                pcm=pcm,
-                rate=rate,
-                speaker="agent",
-            )
-        )
+        offset = max(0.0, (time.monotonic() - self._t0) - (len(pcm) / 2 / rate))
+        self._segments.append(_Segment(at=offset, pcm=pcm, rate=rate, speaker="agent"))
         if interrupted:
             self._cutoffs += 1
         text = await self._transcribe_live()
         self._turns.append(CallTurn("agent", text, interrupted=interrupted))
+        self._trace.log_agent_turn(
+            {
+                "speaker": "agent",
+                "text": text,
+                "start": self._epoch0 + offset,
+                "end": self._epoch0 + offset + len(pcm) / 2 / rate,
+            },
+            assistant_turn=self._next_agent_history_turn(),
+        )
         self._caller.heard(text)
         return True
 

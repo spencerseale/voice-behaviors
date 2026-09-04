@@ -7,7 +7,7 @@ registered on an OTel TracerProvider that LiveKit is handed via
 (agent_session -> agent_turn / user_turn -> llm/tts/stt) are exported to
 Braintrust as-is, so conversation turns nest.
 
-The `invoca_call` root is created as an OTel span (NOT braintrust.start_span),
+The `job_entrypoint` root is created as an OTel span (NOT braintrust.start_span),
 because the two live in different context systems -- the OTel root is what
 LiveKit's `agent_session` span parents under.
 """
@@ -23,14 +23,14 @@ from .masking import MaskingSpanProcessor, noop_masking_function
 
 logger = logging.getLogger(__name__)
 
-# Tracer used to open the `invoca_call` OTel root. Set in setup so it comes from
+# Tracer used to open the `job_entrypoint` OTel root. Set in setup so it comes from
 # the SAME provider that carries the BraintrustSpanProcessor (otherwise the root
 # span would not be exported to Braintrust). None when tracing is disabled.
 _TRACER: Tracer | None = None
 
 
 def get_tracer() -> Tracer | None:
-    """The `invoca` tracer, or None when telemetry setup was skipped."""
+    """The app tracer, or None when telemetry setup was skipped."""
     return _TRACER
 
 
@@ -69,8 +69,8 @@ def setup_braintrust_telemetry() -> bool:
     )
     # Make LiveKit emit ALL of its OTel spans through this provider.
     set_tracer_provider(provider)
-    # Root tracer must come from the same provider so invoca_call is exported too.
-    _TRACER = provider.get_tracer("invoca")
+    # Root tracer must come from the same provider so job_entrypoint is exported too.
+    _TRACER = provider.get_tracer("voice_behaviors.agent")
 
     logger.info("braintrust OTel telemetry enabled (project=%s)", BRAINTRUST_PROJECT)
     return True
